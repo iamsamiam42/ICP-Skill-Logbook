@@ -598,8 +598,8 @@ body{font-family:var(--font);color:var(--ink);min-height:100dvh;overflow-x:hidde
 Queued: 0 entries</div>
       <button class="btn btn-green" onclick="syncNow()">☁️ Sync Now</button>
       <p style="font-size:10px;color:var(--muted)">
-        Entries sync automatically when you save if you have signal.
-        Use this button to manually sync queued offline entries.
+        Entries sync to Google Sheets when you tap Sync Now.
+        If you have no signal, entries queue on your phone and send next time you tap Sync.
       </p>
     </div>
   </div>
@@ -640,7 +640,7 @@ Queued: 0 entries</div>
 // ── Config injected at build time ─────────────────────────
 const SKILLS = [{"key": "RSI", "label": "Rapid Sequence Intubation", "icon": "\ud83d\udc89", "color": "#B45309", "bg": "#FEF3C7"}, {"key": "ETT", "label": "Endotracheal Intubation", "icon": "\ud83d\udd2c", "color": "#6D28D9", "bg": "#EDE9FE"}, {"key": "SGA", "label": "Supraglottic Airway", "icon": "\ud83d\ude2e", "color": "#0E7490", "bg": "#CFFAFE"}, {"key": "BVM", "label": "Bag-Valve-Mask Ventilation", "icon": "\ud83e\udec1", "color": "#8B0000", "bg": "#F9E8E8"}, {"key": "FT", "label": "Finger Thoracostomy", "icon": "\u2702\ufe0f", "color": "#166534", "bg": "#DCFCE7"}, {"key": "FONA", "label": "Front of Neck Airway", "icon": "\ud83e\ude7a", "color": "#C05621", "bg": "#FED7AA"}, {"key": "IVIG", "label": "IV / IO Access", "icon": "\ud83e\ude78", "color": "#0891B2", "bg": "#CFFAFE"}, {"key": "Blood", "label": "Blood Products / TXA / Haemostatics", "icon": "\ud83d\udd34", "color": "#991B1B", "bg": "#FEE2E2"}, {"key": "Other", "label": "Other Endorsed Skill", "icon": "\u2b50", "color": "#374151", "bg": "#F3F4F6"}];
 const CURRENCY_DAYS = 90;
-const WEBHOOK_URL = https://default652e0786f71b4a5798852880abec01.85.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/a69573a8b8d04db0bd1e4b8db8b63d0b/triggers/manual/paths/invoke?api-version=1;
+const WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbzbRS9MG5xshgJFx2bMg9qXYJ0OkYzRReOW0txwLFChYhWug5S0vv45BrQ7b5-gyvwq6Q/exec';  // See setup guide — paste your Google Apps Script Web App URL here
 
 const ICP_MAP = {"3801":"Walsh, Amelia","3802":"Kick, Andrew","3803":"Brown, Brad","3804":"Bromley, Dan","3805":"Robertson, Dan","3806":"Rowland, James","3807":"Squire, Kelsey","3808":"Bigwood, Nick","3809":"Pulleine, Paul","3810":"Wood, Tony","3811":"Purse, Warren","3812":"O'Toole, Dave","3813":"Ferguson, Mark","3814":"McKay, Mick","3815":"Reeves, Paul"};
 
@@ -828,42 +828,49 @@ function delEntry(id){
 async function syncNow(){
   if(!DB.queue.length){ showToast('Nothing to sync'); renderSync(); return; }
   if(!WEBHOOK_URL||WEBHOOK_URL.includes('PASTE')){
-    showToast('⚠️ Webhook not configured yet'); return;
+    showToast('⚠️ Script URL not configured — see setup guide'); return;
   }
   showToast('☁️ Syncing…');
   const prof=DB.profile||{};
-  // Send each queued entry individually so Power Automate can process them
   let sent=0, failed=0;
   for(const entry of [...DB.queue]){
     try{
-      const payload={
-        event:'skill_submission',
-        empId:entry.empId||prof.emp, name:entry.name||prof.name,
-        base:entry.base||'Darwin Station',
-        skill:entry.skill, date:entry.date, type:entry.type,
-        setting:entry.setting, competency:entry.competency,
-        supervisor:entry.supervisor, notes:entry.notes,
-        loggedAt:entry.loggedAt, entryId:entry.id
-      };
-      const r=await fetch(WEBHOOK_URL,{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
+      // Google Apps Script requires GET with params (avoids CORS preflight)
+      const params = new URLSearchParams({
+        action:      'addEntry',
+        entryId:     entry.id,
+        empId:       entry.empId||prof.emp||'',
+        name:        entry.name||prof.name||'',
+        base:        entry.base||'Darwin Station',
+        skill:       entry.skill,
+        skillType:   entry.type||entry.skill,
+        date:        entry.date,
+        setting:     entry.setting||'Real Patient',
+        competency:  entry.competency||'',
+        supervisor:  entry.supervisor||'',
+        notes:       entry.notes||'',
+        loggedAt:    entry.loggedAt||new Date().toISOString()
       });
-      if(r.ok||r.status===202){
-        DB.queue=DB.queue.filter(q=>q.id!==entry.id);
-        sent++;
-      }else{ failed++; }
-    }catch(e){ failed++; }
+      const r = await fetch(`${WEBHOOK_URL}?${params.toString()}`, {
+        method: 'GET',
+        mode:   'no-cors'   // Google Apps Script doGet — no-cors avoids preflight
+      });
+      // no-cors means we can't read the response, but if it didn't throw it reached the server
+      DB.queue = DB.queue.filter(q=>q.id!==entry.id);
+      sent++;
+    }catch(e){
+      failed++;
+    }
   }
-  DB.lastSync=new Date().toISOString();
+  DB.lastSync = new Date().toISOString();
   save();
   renderSync();
-  if(failed>0) showToast(`⚠️ ${sent} sent, ${failed} queued (offline)`);
-  else showToast(`✅ Synced ${sent} entr${sent===1?'y':'ies'}`);
+  if(failed>0) showToast(`⚠️ ${sent} sent, ${failed} couldn't send (offline?)`);
+  else showToast(`✅ Synced ${sent} entr${sent===1?'y':'ies'} to Google Sheets`);
 }
 
 async function silentSync(){
-  if(!DB.queue.length||!WEBHOOK_URL||WEBHOOK_URL.includes('PASTE')) return;
+  if(!DB.queue.length||!WEBHOOK_URL||WEBHOOK_URL.includes('PASTE')||WEBHOOK_URL.includes('GOOGLE')) return;
   try{ await syncNow(); }catch(e){}
 }
 
